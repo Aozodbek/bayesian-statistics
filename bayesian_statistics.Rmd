@@ -1,0 +1,964 @@
+---
+title: "Practical Statistics"
+subtitle: "Part XI: Bayesian Statistics"
+output:
+  html_document:
+    toc: false
+    toc_float: true
+    df_print: paged
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r message=FALSE}
+
+library(tidyverse)
+library(ggplot2)
+library(ggridges)
+library(openintro)
+library(rjags)
+
+```
+
+# Bayes theorem
+
+$$
+P(A_0|B) = { {P(B|A_0) \cdot P(A_0)}
+\over
+{\sum_{i=1}^{n} \limits \left[ P(B | A_i) \cdot P(A_i) \right] }
+}
+$$
+
+## Parking lot
+
+Jose visits campus every Thursday evening. However, some days the
+parking garage is full, often due to college events. There are sporting
+events on 20% of evenings, academic events on 35% of evenings, and no
+events on 45% of evenings. When there is an sporting event, the garage
+fills up about 70% of the time, and it fills up 25% of evenings with
+academic events. On evenings when there are no events, it only fills up
+about 5% of the time.
+
+If Jose comes to campus and finds the garage full, what is the
+probability that there is a sporting event?
+
+The outcome of interest is whether there is a sporting event (call this
+A~1~), and the condition is that the lot is full (B). Let A~2~ represent
+an academic event and A~3~ represent there being no event on campus.
+Then the given probabilities can be written as
+
+|      sport       |     academic      |     no events     |
+|:----------------:|:-----------------:|:-----------------:|
+|  P(A~1~) = 0.2   |  P(A~2~) = 0.35   |  P(A~3~) = 0.45   |
+| P(B\|A~1~) = 0.7 | P(B\|A~2~) = 0.25 | P(B\|A~3~) = 0.05 |
+
+```{r}
+p <- 0.7*0.2 / (0.7*0.2 + 0.25*0.35 + 0.05*0.45)
+sprintf("%.0f%%", p*100)
+
+
+```
+
+Now try to solve it with the tree diagram (see Lab #6).
+
+```{r}
+
+?treeDiag
+
+
+```
+
+Solve the parking lot problem with the tree diagram.
+
+```{r}
+
+treeDiag(
+  c("event", "parking"),
+  p1 = c(.2, .35, .45),
+  out1 = c("sport", "academic", "none"),
+  p2 = list(c(0.7, 0.3), c(0.25, 0.75), c(0.05, 0.95)),
+  out2 = c("full", "available"),
+  showWork = TRUE,
+  solwd = 0.3
+)
+
+```
+
+# Bayesian statistics
+
+## Fighting armies
+
+Two armies meet on a battlefield. The first army consists of 120
+soldiers, and the second of 100. Both groups prepare and start shooting
+at the enemy. For simplicity, let's assume that both opponents use
+identical rifles and fire a salvo (all at once). The hit rate is 20%.
+This is followed by a second salvo, a third, and so on, until one of the
+armies loses all its soldiers.
+
+**Q1:** How many soldiers will survive in the victorious army?
+
+```{r}
+rate <- 0.2  # 20%
+
+army_1 <- 120
+army_2 <- 100
+cat(sprintf("%d vs %d\n", army_1, army_2))
+
+while(army_1 > 0 & army_2 > 0) {
+  hit_1 <- floor(army_1 * rate)
+  hit_2 <- floor(army_2 * rate)
+  army_1 <- army_1 - hit_2
+  army_2 <- army_2 - hit_1
+  cat(sprintf("%d vs %d\n", army_1, army_2))
+}
+
+```
+
+A naïve guess is that the 1st army should win, and 20 of its soldier
+will survive, but the experiment demonstrates that in fact 60 combatants
+will survive. This effect is explained in [Osipov-Lanchester's
+laws](https://en.wikipedia.org/wiki/Lanchester%27s_laws) (namely "square
+law").
+
+Now we will move from *deterministic* conditions to *stochastic*, and
+will suppose that the percentage of hits follows the normal distribution
+with mean 15% and standard deviation 10%.
+
+```{r}
+rate_mean <- 0.15  # 15%
+rate_sd <- 0.1
+
+army_1 <- 120
+army_2 <- 100
+cat(sprintf("%d vs %d\n", army_1, army_2))
+
+while(army_1 > 0 & army_2 > 0) {
+  hit_1 <- floor(army_1 * rnorm(1, rate_mean, rate_sd))
+  hit_2 <- floor(army_2 * rnorm(1, rate_mean, rate_sd))
+  if(hit_1 < 0) hit_1 <- 0
+  if(hit_2 < 0) hit_2 <- 0
+  army_1 <- army_1 - hit_2
+  army_2 <- army_2 - hit_1
+  cat(sprintf("%d vs %d\n", army_1, army_2))
+}
+
+
+```
+
+We expect, that the first army will win, and about 50-70 its soldiers
+will survive. But it is possible that the advantage will be much
+greater. Even the second army can win.
+
+So, we should create a simulation function
+
+```{r}
+
+fight <- function() {
+
+  army_1 <- 120
+  army_2 <- 100
+  
+  while(army_1 > 0 & army_2 > 0) {
+    hit_1 <- floor(army_1 * rnorm(1, rate_mean, rate_sd))
+    hit_2 <- floor(army_2 * rnorm(1, rate_mean, rate_sd))
+    if(hit_1 < 0) hit_1 <- 0
+    if(hit_2 < 0) hit_2 <- 0
+    army_1 <- army_1 - hit_2
+    army_2 <- army_2 - hit_1
+  }
+
+  return(c(army_1, army_2))
+
+}
+
+```
+
+and run it 10,000 times
+
+```{r}
+
+set.seed(1)
+
+result <- replicate(10000, fight())
+result <- as.data.frame(t(result))
+result[result < 0] <- 0
+head(result)
+
+```
+
+**Q2:** What is the probability of each army to win?
+
+```{r}
+
+win_1 <- nrow(filter(result, V1 > 0)) / nrow(result)
+cat(sprintf("%.0f%%", win_1 * 100))
+
+```
+
+**Q3:** What is the probability that every second soldier in the 1st
+army will survive?
+
+```{r}
+
+p <- nrow(filter(result, V1 >= 60)) / nrow(result)
+cat(sprintf("%.0f%%", p * 100))
+
+```
+
+**Q4:** How likely is that the every second soldier in the 2nd army will
+survive?
+
+```{r}
+p <- nrow(filter(result, V2 >= 50)) / nrow(result)
+cat(sprintf("%.0f%%", p * 100))
+
+
+```
+
+**Q5:** What is the probability that at least 1 soldier in the 1st army
+will survive?
+
+```{r}
+p <- nrow(filter(result, V1 >= 1)) / nrow(result)
+cat(sprintf("%.0f%%", p * 100))
+
+ggplot() +
+  geom_density(
+    data = filter(result, V1 > 0),
+    mapping = aes(x=V1, y=after_stat(density)*win_1, fill="army 1"),
+    alpha = 0.5
+  ) +
+  geom_density(
+    data = filter(result, V2 > 0),
+    mapping = aes(x=V2, y=after_stat(density)*(1-win_1), fill="army 2"),
+    alpha = 0.5
+  ) +
+  theme_classic() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  ) +
+  labs(
+    title = "survive rate by army",
+    x = "number of soldiers",
+    y = "density",
+    fill = ""  # legend
+  )
+
+
+
+```
+
+## Fish in the lake
+
+How many fish are in the lake?
+
+-   We can't catch them all.
+-   But we can catch some of the them.
+
+Experiment:
+
+1.  Catch a couple of fish.
+2.  Mark them, and throw them back.
+3.  Catch a couple of fish again.
+4.  Count how many are marked.
+
+For example, we mark 20 fishes, release them, and catch again 20 fishes.
+Of them, 5 have marks. Can we estimate the total number of fish in the
+lake?
+
+![](images/fish-marked.png)
+
+Now imagine, that the total number of fish is 50.
+
+```{r}
+
+fish_marked <- 20
+fish_unmarked <- 50-20
+fish_vec <- c(
+  rep(0, fish_unmarked),
+  rep(1, fish_marked)
+)
+fish_vec
+
+```
+
+It was steps 1-2. Now we need to catch again 20 fish from this lake, and
+calculate how many of them have marks.
+
+```{r}
+
+sam <- sample(fish_vec, 20, replace=FALSE)
+sam
+
+```
+
+```{r}
+
+sum(sam)
+
+
+```
+
+### Big experiment
+
+We suppose that the lake can contain no more than 250 fish. Generate
+multiple variants.
+
+```{r}
+
+simulation_cnt <- 1000
+
+data <- data.frame(
+  fish_in_lake = sample(20:250, simulation_cnt, replace=TRUE),
+  fish_with_marks = NA
+)
+
+data
+
+```
+
+```{r}
+
+for(i in 1:simulation_cnt) {
+  fish_marked <- 20
+  fish_unmarked <- data$fish_in_lake[i] - 20
+  fish_vec <- c(
+    rep(0, fish_unmarked),
+    rep(1, fish_marked)
+  )
+  data$fish_with_marks[i] <- sum(sample(fish_vec, 20))
+}
+
+data
+
+```
+
+Number of marked fish has to be equal to 5. Remove experiments not
+satisfying this requirement. Build a histogram.
+
+```{r}
+data <- filter(data, fish_with_marks == 5)
+hist(data$fish_in_lake)
+
+```
+
+Increase the number of simulations to 10,000 and repeat all steps to the
+histogram.
+
+```{r}
+
+
+
+```
+
+Bayes' theorem of conditional probability:
+
+$$
+P(A|B) = {{P(A)} \over {P(B)}} \cdot P(B|A)
+$$
+
+In case of 100 fish and 5 marks, the formula of P(100🐟\|5⭐) will take
+the next form:
+
+$$?$$
+
+But P(100🐟\|5⭐) can be calculated directly from the data:
+
+$$
+P(100🐟|5⭐) = {M \over N}
+$$
+
+where M is the number of outcomes with (100🐟 and 5⭐), and N is the
+total number of 5⭐ cases
+
+```{r}
+
+prob <- count(data, fish_in_lake, name="p")
+prob$p <- prob$p / sum(prob$p)
+
+head(prob)
+
+```
+
+When the probability P(B\|A) is known, it can be plotted with
+`geom_col()` function
+
+```{r}
+
+data %>%
+  group_by(fish_in_lake) %>%
+  count
+
+```
+
+What is the probability that the total number of fish in the lake is
+150?
+
+```{r}
+p <- prob[prob$fish_in_lake == 150, "p"]
+sprintf("%.1f%%", p * 100)
+```
+
+Interval estimation, such as number of fish between 90 and 100 given 5,
+can be calculated from "data", dividing frequencies by the total number
+of observations:
+
+```{r eval=FALSE}
+ggplot(data) +
+  xlim(0, 250) +
+  geom_histogram(
+    aes(
+      x = fish_in_lake,
+      y = after_stat(count / nrow(data))  # <<
+    ),
+    binwidth = 10,
+    na.rm = TRUE
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+```
+
+The right histogram shows the probabilities P(B\|A) for intervals.
+Because `binwidth = 10`, then the probability of the number of fish to
+be in the interval (90, 100] is a sum of point probabilities: P(91\|5) +
+P(92\|5) + P(93\|5) + ...
+
+Find the probability of the number of fish to be in the interval (90,
+100].
+
+```{r}
+ggplot(data) +
+  xlim(0, 250) +
+  geom_histogram(
+    aes(
+      x = fish_in_lake,
+      y = after_stat(count / nrow(data))  # <<
+    ),
+    binwidth = 10,
+    na.rm = TRUE
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_minimal()
+df <- filter(prob, fish_in_lake > 90 & fish_in_lake <= 100)
+sum(df$p)
+
+```
+
+### Shy fish
+
+Bayesian models can be easily modified to include new information. A
+fisherman says: "Marked fish get shy! It is half as likely to catch a
+marked fish compared to a fish that has not been marked."
+
+```{r}
+for(i in 1:simulation_cnt) {
+  fish_marked <- 20
+  fish_unmarked <- data$fish_in_lake[i] - 20
+  fish_vec <- c(
+    rep(0, fish_unmarked),
+    rep(1, fish_marked)
+  )
+  prob_pick <- ifelse(fish_vec == 0, 1.0, 0.5)  # <<
+  data$fish_with_marks[i] <- 
+    sum(sample(fish_vec, 20, prob=prob_pick))   # <<
+}
+
+```
+
+What is the meaning of the comparison `fish_vec == 0`?
+
+Repeat the big experiment with this modification.
+
+```{r}
+
+simulation_cnt <- 10000
+
+data <- data.frame(
+  fish_in_lake = sample(20:250, simulation_cnt, replace=TRUE),
+  fish_with_marks = NA
+)
+
+for(i in 1:simulation_cnt) {
+  fish_marked <- 20
+  fish_unmarked <- data$fish_in_lake[i] - 20
+  fish_vec <- c(
+    rep(0, fish_unmarked),
+    rep(1, fish_marked)
+  )
+  prob_pick <- ifelse(fish_vec == 0, 1.0, 0.5)  # <<
+  data$fish_with_marks[i] <- 
+    sum(sample(fish_vec, 20, prob=prob_pick))   # <<
+}
+
+p4 <- filter(data, fish_with_marks == 5) %>%
+  ggplot() + xlim(0, 250) +
+    geom_histogram(
+      aes(x=fish_in_lake, y=after_stat(count / nrow(data))),
+      breaks=seq(0, 250, by=10),
+      na.rm=T, fill="pink", color="black"
+    ) +
+    scale_y_continuous(labels = scales::percent) +
+    xlab("shy fish") +
+    ylab("") +
+    theme_minimal()
+
+plot_grid(p3 + xlab("original"), p4)
+
+```
+
+### New prior
+
+The fisherman again has what to say: "There has always been plenty of
+fish in the lake. Around 200, I would say!"
+
+Lets use the Negative Binomial Distribution with μ = 200.
+
+Repeat the simulation with the new prior.
+
+```{r}
+
+fish_in_lake <- rnbinom(simulation_cnt, mu=200-20, size=4) + 20
+simulation_cnt <- 10000
+
+data <- data.frame(
+  fish_in_lake = rnbinom(simulation_cnt, mu=200-20, size=4) + 20,  # <<
+  fish_with_marks = NA
+)
+
+for(i in 1:simulation_cnt) {
+  fish_marked <- 20
+  fish_unmarked <- data$fish_in_lake[i] - 20
+  fish_vec <- c(
+    rep(0, fish_unmarked),
+    rep(1, fish_marked)
+  )
+  prob_pick <- ifelse(fish_vec == 0, 1.0, 0.5)
+  data$fish_with_marks[i] <- 
+    sum(sample(fish_vec, 20, prob=prob_pick))
+}
+
+p5 <- filter(data, fish_with_marks == 5) %>%
+  ggplot() + xlim(0, 250) +
+    geom_histogram(
+      aes(x=fish_in_lake, y=after_stat(count / nrow(data))),
+      breaks=seq(0, 250, by=10),
+      na.rm=T, fill="pink", color="black"
+    ) +
+    scale_y_continuous(labels = scales::percent) +
+    xlab("around 200!") +
+    ylab("") +
+    theme_minimal()
+
+#plot_grid(p1 + xlab("original"), plot_5)
+plot_grid(p4, p5)
+
+```
+
+## Optimization
+
+Even though our experiment seems correct, it was simulated only 10,000,
+so some assumptions about the number of fish are supported by just a few
+of observations. The shape of the histogram is not perfect. However,
+simulating the model more times will be time consuming.
+
+In Bayesian statistics, we work with complex models and run calculations
+millions times. This process can be optimized with several methods, such
+as Markov chain Monte Carlo (MCMC).
+
+Note: Markov chain is a big class of algorithms studied in the field of
+Stochastic process. For example, it is used by Google in PageRank.
+
+Gibbs sampler is a variant of MCMC. We will use its implementation in
+JAGS library, and the corresponding library connecting it with R.
+
+```{r}
+
+library(rjags)
+
+```
+
+This is our generative model
+
+```{r eval=FALSE}
+
+{for(i in 1:simulation_cnt) {}
+  fish_marked <- 20
+  fish_unmarked <- data$fish_in_lake[i] - 20
+  fish_vec <- c(
+    rep(0, fish_unmarked),
+    rep(1, fish_marked)
+  )
+  data$fish_with_marks[i] <- sum(sample(fish_vec, 20))
+}
+
+```
+
+Sampling values from `fish_vec` can be simulated as a toss of coin with
+different probabilities for head 🐟 and tails ⭐. But the marked fish ⭐
+need to be sampled without replacement. So, binomial distribution is not
+applicable, and we should use hypergeometric distribution:
+
+$$
+y_1 \sim dhyper(n_1, n_2, m_1, \psi)
+$$
+
+An urn contains n~1~ white balls and n~2~ black balls. A total of m~1~
+balls are drawn from the urn without replacement. Then y~1~, the number
+of white balls drawn from the urn.
+
+In our case, we will say that n~1~ is unmarked fish 🐟, and n~2~ is the
+fish with marks ⭐.
+
+JAGS uses a special programming language similar to R.
+
+```{r}
+
+model_string <- "model {
+
+
+
+}"
+
+data_list <- list(n_unmarked=15)
+jags_model <- jags.model(textConnection(model_string), data=data_list)
+
+```
+
+```{r}
+
+samples <- coda.samples(jags_model, c("n_fish"), n.iter=10000)
+
+```
+
+Make a histogram of `samples`.
+
+```{r}
+x <- samples[[1]][, 1]
+
+p6 <- ggplot() +
+  xlim(0, 250) +
+  geom_histogram(
+    aes(x=x, y=after_stat(density)),
+    breaks=seq(0, 250, by=10),
+    na.rm=T, fill="pink", color="black"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  xlab("jags") +
+  ylab("probability") +
+  theme_minimal()
+
+plot_grid(p6, p3 + xlab("original"))
+
+
+```
+
+Now we can add more features to the model.
+
+How to attain the "shy fish" condition?
+
+For the expert opinion "Around 200, I would say!", we use the following
+expression:
+
+`rnbinom(simulation_cnt, mu=200-20, size=4) + 20`
+
+In JAGS languages it will look slightly different:
+
+`y ~ dnegbin(p, size)`
+
+Probability parameter `p` is calculated from `mu`: p = size / (size+mu).
+
+Repeat simulation with two new conditions and build a histogram.
+
+```{r}
+model_string <- "model {
+  n_fish_real ~ dnegbin(4/(4+180), 4)
+  n_fish <- n_fish_real + 20
+  n_unmarked ~ dhyper(n_fish-20, 10, 20, 1)
+}"
+
+data_list <- list(n_unmarked=15)
+jags_model <- jags.model(textConnection(model_string), data=data_list)
+
+
+samples <- coda.samples(jags_model, c("n_fish"), n.iter=10000)
+
+
+x <- samples[[1]][, 1]
+
+p7 <- ggplot() +
+  xlim(0, 250) +
+  geom_histogram(
+    aes(x=x, y=after_stat(density)),
+    breaks=seq(0, 250, by=10),
+    na.rm=T, fill="pink", color="black"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  xlab("jags") +
+  ylab("probability") +
+  theme_minimal()
+
+plot_grid(p7, p5 + xlab("original"))
+
+
+
+```
+
+JAGS models can be simulated millions and billions of time with
+reasonable computational cost.
+
+# Proportions
+
+## Zombie apocalypse
+
+![](images/zombie.webp){width="65" height="100"}
+
+We create a new drug to treat zombieism. It has never been tested
+before, but the results from this pilot test have two recoveries out of
+4 subjects.
+
+The phrase "has never been tested before" is very important here, so we
+will use *Bayes uniform prior* Beta(1,1). It applies if one knows that
+both binary outcomes are possible.
+
+The following code might look terrifying, but it simply calculate
+densities for different parameters of beta distribution and then create
+a plot.
+
+```{r}
+
+prop_model <- function(data=c(), prior_prop=c(1, 1), n_draws=10000) {
+
+  data <- as.logical(data)
+  
+  density_points <- seq(0, 1, length.out=100)
+  density_step <- 1 / 100
+  
+  # calculate densities and save them to data.frame
+  bayes_steps <- do.call(rbind, lapply(0:length(data), function(i) {
+    value <- ifelse(i==0, "prior", ifelse(data[i], "success", "failure"))
+    label <- sprintf("n=%d", i)
+    cnt_success <- sum(data[seq_len(i)])
+    cnt_failure <- sum(!data[seq_len(i)])
+    prob <- dbeta(
+      density_points,
+      shape1 = cnt_success + prior_prop[1],
+      shape2 = cnt_failure + prior_prop[2]
+    )
+    # prob <- prob * density_step
+    tibble(label, value, density_points, prob)
+  }))
+  
+  # plot
+  bayes_steps$label <- factor(
+    bayes_steps$label,
+    levels = paste0("n=", seq(length(data), 0, by=-1))
+  )
+  
+  bayes_steps$value <- factor(
+    bayes_steps$value,
+    levels = c("prior", "success", "failure")
+  )
+  
+  p <- ggplot(bayes_steps) +
+    geom_density_ridges(
+      aes(x=density_points, y=label, height=prob, fill=value),
+      stat="identity", color="white", alpha=0.8, size=1, scale=1.5
+    ) +
+    scale_fill_manual(
+      breaks = c("prior", "success", "failure"),
+      values = c("#E7B800", "#00AF55", "#FC4E07"),
+      labels =  c("prior", "success", "failure"),
+      name = "",
+    ) +
+    labs(
+      title = sprintf("proportion: %d successes, %d failures",
+                      sum(data), sum(!data)),
+      x = "proportion of success", y = ""
+    ) +
+    theme_minimal()
+  
+  print(p)
+  
+  # returning a sample from the posterior distribution
+  posterior_sample <- rbeta(
+    n_draws,
+    prior_prop[1] + sum(data),
+    prior_prop[2] + sum(!data)
+  )
+  invisible(posterior_sample)
+
+}
+
+```
+
+As it was said, we start with Bayes uniform prior, and add new
+observations: 2 zombies recovered and 2 not. For every step,
+`prop_model` plots the successive posterior probabilities that the
+zombie antidote will be successful:
+
+```{r}
+data <- c(1, 0, 0, 1)
+prop_model(data)
+
+
+```
+
+We continue our experiments on new zombies, all of the are unsuccessful.
+We use the posterior from the first experiment as a prior in the second
+experiment.
+
+```{r}
+data <- c(0, 0, 0, 0, 0, 0, 0, 0, 0)
+posterior <- prop_model(data, prior_prop=c(2+1, 2+1))
+
+
+```
+
+We assumed that both outcomes, to heal a zombie or fail, are
+equiprobable, so we used the uniform prior with beta(1, 1). Depending on
+preliminary knowledge, prior can have other values, for example
+*non-informative Jeffreys prior* with beta(½, ½).
+
+```{r fig.height=1.5, fig.width=2}
+
+ggplot() +
+  stat_function(
+    fun=dbeta, args=list(shape1=0.5, shape2=0.5),
+    geom="area", fill="pink", color="black"
+  ) +
+  ylab("") +
+  theme_minimal()
+
+```
+
+Lets try some random experiment. Generate 50 random number from binomial
+distribution with success probability 20%.
+
+```{r}
+data <- rbinom(50, 1, 0.2)
+prop_model(data)
+
+
+```
+
+Returning to our experimental drug:
+
+```{r fig.height=3, fig.width=5}
+
+data <- c(1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+posterior <- prop_model(data)
+
+```
+
+Make a histogram of the final posterior
+
+```{r}
+
+
+
+```
+
+Find the most probable proportion of success.
+
+```{r}
+
+median(posterior)
+
+```
+
+There is another drug developed by a rival pharmaceutical company with
+efficacy 7%. Calculate the probability that the success rate of our
+treatment is greater than 7%.
+
+```{r}
+sum(posterior > 0.07) / length(posterior)
+
+
+```
+
+**N.B.** Frequentist methods regard the population value as a fixed,
+unvarying (but unknown) quantity, without a probability distribution. On
+the contrary, in the Bayesian framework, probability simply expresses a
+degree of belief (confidence) in an event and can be described through a
+distribution.
+
+Calculate the 90% confidence interval for the proportion (see Lab #11),
+given that 2 of 13 zombies recovered.
+
+$$
+\hat{p} \pm z \sqrt{
+  {\hat{p} (1-\hat{p})}
+  \over
+  {n}
+}
+$$
+
+```{r}
+alpha <- 0.10
+n <- length(data)   # 13
+p <- sum(data) / n  # 2/13
+z <- qnorm(p=alpha/2, lower.tail=F)  # 1.645
+ci_lower <- p - z * sqrt(p*(1-p)/n)
+ci_upper <- p + z * sqrt(p*(1-p)/n)
+c(ci_lower, ci_upper)
+
+
+```
+
+**Interpretation**: we can be 90% confident that the true proportion of
+success would lie within the lower and upper limits of the CI, based on
+hypothesized repeats of the experiment.
+
+**N.B.** Having said that, an 90% confidence level does not mean that
+for a given realized interval there is an 90% probability that the
+population parameter lies within the interval!
+
+Bayesian inference uses a concept of **credible interval**. It is a
+range containing a particular percentage of posterior. It can be found
+using the corresponding function of beta distribution:
+
+```{r}
+qbeta(0.05, shape1=2+1, shape2=11+1)
+qbeta(0.95, shape1=2+1, shape2=11+1)
+
+
+```
+
+or with the simple `quantile` function:
+
+```{r}
+
+quantile(posterior, c(0.05, 0.95))
+
+```
+
+Bayesian framework allows us to say "given the observed data, the effect
+has 90% probability of falling within this range".
+
+
+$$
+π = 3.141592653
+$$
+
+Of the first 10 digits of π, how many are even numbers? According to
+theory, even and odd digits of any irrational number, such as π, are
+supposed to be equally probable. Does this little experiment mean that
+the theory is invalid with 95% CI?
+
+```{r}
+
+alpha <- 0.05
+qbeta(alpha/2, shape1=2+1, shape2=8+1)
+
+```
+
+Find the credible interval with `quantile` function.
+
+```{r}
+
+qbeta(1-alpha/2, shape1=2+1, shape2=8+1)
+
+```
