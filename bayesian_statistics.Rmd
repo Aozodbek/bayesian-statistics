@@ -1,15 +1,4 @@
----
-title: "Practical Statistics"
-subtitle: "Part XI: Bayesian Statistics"
-output:
-  html_document:
-    toc: false
-    toc_float: true
-    df_print: paged
-editor_options: 
-  markdown: 
-    wrap: 72
----
+
 
 ```{r message=FALSE}
 
